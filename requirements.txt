@@ -1,0 +1,25 @@
+# --- Yapay Zeka & Derin Öğrenme ---
+torch
+torchvision
+# U-Net, U-Net++, DeepLabV3+ modellerini hazır sunan kütüphane
+segmentation-models-pytorch
+
+# --- Görüntü İşleme ---
+numpy
+# Sunucularda (Cloud) çalışırken hata vermemesi için 'headless' versiyonu şarttır
+opencv-python-headless
+Pillow
+albumentations
+matplotlib
+
+# --- Web Arayüzü & Dashboard ---
+# Eğer Streamlit kullanacaksan:
+streamlit
+# Eğer Gradio kullanacaksan (ikisi aynı anda olabilir):
+gradio
+
+# --- Güvenlik & Araçlar ---
+# .env dosyasından şifreleri okumak için
+python-dotenv
+# Veri tabloları ve analiz için
+pandas

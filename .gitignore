@@ -1,0 +1,48 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+
+# Model files
+*.pth
+*.pt
+*.onnx
+
+# Data
+data/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Docker
+.dockerignore
+
+# Outputs
+output_*.png
+*.log
+dataset.zip 
+dataset/ 
+dataset.zip 
+dataset/ 
+*.zip 
+.venv/
+venv/
+__pycache__/
+*.zip
+*.pyd
+*.dll.venv/ 
+dataset.zip 
