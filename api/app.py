@@ -3,6 +3,8 @@ import os
 import io
 import sys
 from PIL import Image
+# --- YENİ EKLEME: Mailer fonksiyonunu çağırıyoruz ---
+from mailer import send_pathovision_report
 
 # Alt klasördeki model.py'yi görebilmesi için path ekleyelim
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -15,7 +17,8 @@ st.set_page_config(
     layout="wide"
 )
 
-# 2. ÖZEL TASARIM (CSS)
+
+# 2. ÖZEL TASARIM (CSS) - (Olduğu gibi bırakıldı)
 def apply_custom_design():
     st.markdown("""
         <style>
@@ -43,19 +46,19 @@ def apply_custom_design():
         </div>
     """, unsafe_allow_html=True)
 
+
 apply_custom_design()
 
-# 3. MODEL SERVİSİNİ BAŞLAT (Hata Ayıklama Moduyla)
+
+# 3. MODEL SERVİSİNİ BAŞLAT
 @st.cache_resource
 def load_model_service():
     try:
-        # Klasör varlık kontrolü
-        if not os.path.exists(os.path.join(os.path.dirname(__file__), "models")):
-            st.error("Kritik Hata: 'api/models' klasörü bulunamadı!")
         return ModelInference()
     except Exception as e:
         st.error(f"Model yükleme hatası: {e}")
         return None
+
 
 model_service = load_model_service()
 
@@ -72,18 +75,37 @@ st.markdown('</div>', unsafe_allow_html=True)
 if uploaded_file and model_service:
     image = Image.open(uploaded_file)
     col1, col2 = st.columns(2)
-    
+
     with col1:
         st.image(image, caption="Kaynak Görüntü", use_container_width=True)
-    
+
     with col2:
         if st.button("Analizi Başlat"):
             with st.spinner('İşleniyor...'):
                 img_byte_arr = io.BytesIO()
                 image.save(img_byte_arr, format='PNG')
                 results = model_service.predict(img_byte_arr.getvalue(), model_type=model_type)
-                
+
                 if results:
                     st.success("Tamamlandı!")
-                    st.metric("Hücre Sayısı", results.get("detected_cells", 0))
-                    st.json(results)
+                    cell_count = results.get("detected_cells", 0)
+                    st.metric("Hücre Sayısı", cell_count)
+
+                    # --- YENİ EKLEME: E-POSTA GÖNDERİM BÖLÜMÜ ---
+                    st.markdown("---")
+                    st.subheader("📬 Sonuçları Bildir")
+                    email_input = st.text_input("Raporun gönderileceği e-posta adresi:")
+
+                    if st.button("E-posta Olarak Gönder"):
+                        if email_input:
+                            success = send_pathovision_report(email_input, model_type, cell_count)
+                            if success:
+                                st.balloons()
+                                st.info("Rapor gönderildi! Mailtrap Inbox'ı kontrol ediniz.")
+                            else:
+                                st.error("E-posta gönderilemedi.")
+                        else:
+                            st.warning("Lütfen e-posta adresi girin.")
+
+                    with st.expander("Detaylı JSON Verisi"):
+                        st.json(results)
