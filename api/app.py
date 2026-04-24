@@ -3,14 +3,22 @@ import os
 import io
 import sys
 from PIL import Image
-# --- YENİ EKLEME: Mailer fonksiyonunu çağırıyoruz ---
-from mailer import send_pathovision_report
 
-# Alt klasördeki model.py'yi görebilmesi için path ekleyelim
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+# 1. YOL AYARLARI (Modül çakışmalarını önlemek için en başa ekledik)
+current_dir = os.path.dirname(os.path.abspath(__file__))
+if current_dir not in sys.path:
+    sys.path.append(current_dir)
+
+# --- Mailer fonksiyonunu import ediyoruz ---
+try:
+    from mailer import send_pathovision_report
+except ImportError:
+    from api.mailer import send_pathovision_report
+
+# Model servisini alt klasörden çekiyoruz
 from model import ModelInference
 
-# 1. SAYFA AYARLARI
+# 2. SAYFA AYARLARI
 st.set_page_config(
     page_title="PathoVision AI - Kanser Hücresi Tespit",
     page_icon="🔬",
@@ -18,7 +26,7 @@ st.set_page_config(
 )
 
 
-# 2. ÖZEL TASARIM (CSS) - (Olduğu gibi bırakıldı)
+# 3. ÖZEL TASARIM (CSS)
 def apply_custom_design():
     st.markdown("""
         <style>
@@ -50,7 +58,7 @@ def apply_custom_design():
 apply_custom_design()
 
 
-# 3. MODEL SERVİSİNİ BAŞLAT
+# 4. MODEL SERVİSİNİ BAŞLAT
 @st.cache_resource
 def load_model_service():
     try:
@@ -62,7 +70,7 @@ def load_model_service():
 
 model_service = load_model_service()
 
-# 4. ARAYÜZ BÖLÜMLERİ
+# 5. ARAYÜZ BÖLÜMLERİ
 with st.sidebar:
     st.header("⚙️ Ayarlar")
     model_type = st.selectbox("Model Seçimi", ["unet", "unetplusplus"])
@@ -80,6 +88,7 @@ if uploaded_file and model_service:
         st.image(image, caption="Kaynak Görüntü", use_container_width=True)
 
     with col2:
+        # Analiz butonu ve sonuçların saklanması
         if st.button("Analizi Başlat"):
             with st.spinner('İşleniyor...'):
                 img_byte_arr = io.BytesIO()
@@ -87,25 +96,32 @@ if uploaded_file and model_service:
                 results = model_service.predict(img_byte_arr.getvalue(), model_type=model_type)
 
                 if results:
-                    st.success("Tamamlandı!")
-                    cell_count = results.get("detected_cells", 0)
-                    st.metric("Hücre Sayısı", cell_count)
+                    st.session_state['results'] = results
+                    st.session_state['analysis_done'] = True
 
-                    # --- YENİ EKLEME: E-POSTA GÖNDERİM BÖLÜMÜ ---
-                    st.markdown("---")
-                    st.subheader("📬 Sonuçları Bildir")
-                    email_input = st.text_input("Raporun gönderileceği e-posta adresi:")
+        # Analiz bittiyse sonuçları göster ve mail seçeneğini sun
+        if st.session_state.get('analysis_done'):
+            results = st.session_state['results']
+            st.success("Analiz Tamamlandı!")
+            cell_count = results.get("detected_cells", 0)
+            st.metric("Hücre Sayısı", cell_count)
 
-                    if st.button("E-posta Olarak Gönder"):
-                        if email_input:
-                            success = send_pathovision_report(email_input, model_type, cell_count)
-                            if success:
-                                st.balloons()
-                                st.info("Rapor gönderildi! Mailtrap Inbox'ı kontrol ediniz.")
-                            else:
-                                st.error("E-posta gönderilemedi.")
+            # --- E-POSTA GÖNDERİM BÖLÜMÜ ---
+            st.markdown("---")
+            st.subheader("📬 Sonuçları Bildir")
+            email_input = st.text_input("Raporun gönderileceği e-posta adresi:", key="email_box")
+
+            if st.button("E-posta Olarak Gönder"):
+                if email_input:
+                    with st.spinner('E-posta gönderiliyor...'):
+                        success = send_pathovision_report(email_input, model_type, cell_count)
+                        if success:
+                            st.balloons()
+                            st.success(f"Rapor başarıyla {email_input} adresine iletildi!")
                         else:
-                            st.warning("Lütfen e-posta adresi girin.")
+                            st.error("E-posta gönderimi başarısız oldu. Mailtrap ayarlarını kontrol edin.")
+                else:
+                    st.warning("Lütfen geçerli bir e-posta adresi girin.")
 
-                    with st.expander("Detaylı JSON Verisi"):
-                        st.json(results)
+            with st.expander("Detaylı JSON Verisi"):
+                st.json(results)
