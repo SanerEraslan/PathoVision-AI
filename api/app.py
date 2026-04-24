@@ -4,7 +4,7 @@ import io
 import sys
 from PIL import Image
 
-# 1. YOL AYARLARI (Modül çakışmalarını önlemek için en başa ekledik)
+# 1. YOL AYARLARI
 current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path:
     sys.path.append(current_dir)
@@ -13,9 +13,12 @@ if current_dir not in sys.path:
 try:
     from mailer import send_pathovision_report
 except ImportError:
-    from api.mailer import send_pathovision_report
+    try:
+        from api.mailer import send_pathovision_report
+    except ImportError:
+        st.error("mailer.py dosyası bulunamadı! Lütfen dosyanın api/ klasöründe olduğundan emin olun.")
 
-# Model servisini alt klasörden çekiyoruz
+# Model servisini çekiyoruz
 from model import ModelInference
 
 # 2. SAYFA AYARLARI
@@ -88,7 +91,7 @@ if uploaded_file and model_service:
         st.image(image, caption="Kaynak Görüntü", use_container_width=True)
 
     with col2:
-        # Analiz butonu ve sonuçların saklanması
+        # ANALİZ BUTONU
         if st.button("Analizi Başlat"):
             with st.spinner('İşleniyor...'):
                 img_byte_arr = io.BytesIO()
@@ -96,32 +99,38 @@ if uploaded_file and model_service:
                 results = model_service.predict(img_byte_arr.getvalue(), model_type=model_type)
 
                 if results:
+                    # Sonuçları Session State'e kaydediyoruz
                     st.session_state['results'] = results
                     st.session_state['analysis_done'] = True
+                    st.session_state['last_count'] = results.get("detected_cells", 0)
 
-        # Analiz bittiyse sonuçları göster ve mail seçeneğini sun
+        # SONUÇLARIN GÖRÜNTÜLENMESİ (Önce burası çalışır)
         if st.session_state.get('analysis_done'):
-            results = st.session_state['results']
-            st.success("Analiz Tamamlandı!")
-            cell_count = results.get("detected_cells", 0)
-            st.metric("Hücre Sayısı", cell_count)
+            res = st.session_state['results']
+            count = st.session_state['last_count']
 
-            # --- E-POSTA GÖNDERİM BÖLÜMÜ ---
+            st.success(f"Analiz Tamamlandı! Toplam {count} hücre tespit edildi.")
+            st.metric("Hücre Sayısı", count)
+
+            # --- E-POSTA BÖLÜMÜ (Sonuçların altında) ---
             st.markdown("---")
-            st.subheader("📬 Sonuçları Bildir")
-            email_input = st.text_input("Raporun gönderileceği e-posta adresi:", key="email_box")
+            st.subheader("📬 Analiz Raporunu Gönder")
+
+            email_input = st.text_input("Raporun gönderileceği e-posta adresi:", key="email_input_field")
 
             if st.button("E-posta Olarak Gönder"):
                 if email_input:
-                    with st.spinner('E-posta gönderiliyor...'):
-                        success = send_pathovision_report(email_input, model_type, cell_count)
+                    with st.spinner('Rapor hazırlanıyor ve gönderiliyor...'):
+                        # mailer.py fonksiyonunu çağırıyoruz
+                        success = send_pathovision_report(email_input, model_type, count)
                         if success:
                             st.balloons()
                             st.success(f"Rapor başarıyla {email_input} adresine iletildi!")
                         else:
-                            st.error("E-posta gönderimi başarısız oldu. Mailtrap ayarlarını kontrol edin.")
+                            st.error(
+                                "E-posta gönderimi başarısız oldu. Lütfen Mailtrap SMTP ayarlarınızı ve USERNAME/PASSWORD bilgilerinizi kontrol edin.")
                 else:
                     st.warning("Lütfen geçerli bir e-posta adresi girin.")
 
             with st.expander("Detaylı JSON Verisi"):
-                st.json(results)
+                st.json(res)
