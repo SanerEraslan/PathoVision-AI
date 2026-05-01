@@ -8,7 +8,7 @@ def send_pathovision_report(target_email, model_name, cell_count):
     SMTP_SERVER = "smtp.office365.com"  # Outlook/Hotmail için standart sunucu
     SMTP_PORT = 587
     USERNAME = "phatovision@outlook.com"  # Buraya kendi adresini yaz
-    PASSWORD = "7DA9A-YZZXT-WUBZ8-E93NK-4QDR6"  # Aldığın uygulama şifresini yaz
+    PASSWORD = "cgxorfxonkumqthr"  # Aldığın uygulama şifresini yaz
 
     message = MIMEMultipart()
     message["From"] = USERNAME
