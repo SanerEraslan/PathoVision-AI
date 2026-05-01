@@ -17,3 +17,7 @@ plotly
 
 # --- Güvenlik & Araçlar ---
 python-dotenv
+
+fpdf2
+plotly
+pandas
