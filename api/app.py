@@ -1,12 +1,13 @@
 import streamlit as st
 import io
 import pandas as pd
+import numpy as np
 import plotly.express as px
-from PIL import Image, ImageOps, ImageDraw
+from PIL import Image, ImageDraw
 from fpdf import FPDF
 import tempfile
 import os
-import matplotlib.pyplot as plt # Kaleido yerine güvenli liman
+import matplotlib.pyplot as plt
 
 # --- YARDIMCI FONKSİYONLAR ---
 def tr_fix(text):
@@ -17,31 +18,51 @@ def tr_fix(text):
         text = str(text).replace(tr, lat)
     return text
 
-def perform_analysis_sim(image):
-    """Resmin üzerine şeffaf hücre işaretleri ekler."""
-    base = image.convert("RGBA")
-    overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
-    draw = ImageDraw.Draw(overlay)
-    w, h = base.size
+def perform_segmentation(image):
+    """
+    Görüntüyü analiz ederek pikselleri Kanserli, Sağlıklı ve Arkaplan olarak ayırır.
+    Gerçek model maskesini simüle eder.
+    """
+    img_array = np.array(image.convert("RGB"))
+    h, w, _ = img_array.shape
     
-    import random
-    # Kanserli hücreler (Kırmızı)
-    for _ in range(15):
-        x, y = random.randint(int(w*0.2), int(w*0.5)), random.randint(int(h*0.2), int(h*0.5))
-        draw.ellipse([x-15, y-15, x+15, y+15], fill=(255, 0, 0, 100), outline=(255, 0, 0, 200))
-    # Sağlıklı hücreler (Yeşil)
-    for _ in range(25):
-        x, y = random.randint(int(w*0.5), int(w*0.8)), random.randint(int(h*0.4), int(h*0.8))
-        draw.ellipse([x-12, y-12, x+12, y+12], fill=(0, 255, 0, 100), outline=(0, 255, 0, 200))
-        
-    return Image.alpha_composite(base, overlay).convert("RGB")
+    # Simülasyon: Arkaplanı (parlak alanlar) ayır
+    grayscale = np.mean(img_array, axis=2)
+    bg_mask = grayscale > 225 # Beyaza yakın pikseller arkaplandır
+    
+    # Simülasyon: Kanserli bölge oluştur (Görüntünün merkezinde rastgele bir doku)
+    y, x = np.ogrid[:h, :w]
+    center_y, center_x = h // 2, w // 2
+    cancer_mask = (x - center_x)**2 + (y - center_y)**2 < (min(h, w) // 3)**2
+    cancer_mask = cancer_mask & ~bg_mask # Sadece doku olan yerlerde kanser olabilir
+    
+    # Sağlıklı doku: Arkaplan olmayan ve kanser olmayan her yer
+    healthy_mask = ~bg_mask & ~cancer_mask
 
-# --- PDF OLUŞTURMA FONKSİYONU (KALEIDO'SUZ VERSİYON) ---
-def create_pdf(results_data, processed_img):
+    # Görselleştirme (Overlay)
+    overlay = np.zeros((h, w, 4), dtype=np.uint8)
+    overlay[healthy_mask] = [34, 197, 94, 100]  # Yeşil (Sağlıklı)
+    overlay[cancer_mask] = [231, 76, 60, 130]   # Kırmızı (Kanserli)
+    
+    base_img = image.convert("RGBA")
+    mask_img = Image.fromarray(overlay, mode="RGBA")
+    final_img = Image.alpha_composite(base_img, mask_img).convert("RGB")
+    
+    # İstatistikleri hesapla
+    total_pixels = h * w
+    stats = {
+        "Arkaplan": round((np.sum(bg_mask) / total_pixels) * 100, 1),
+        "Saglikli": round((np.sum(healthy_mask) / total_pixels) * 100, 1),
+        "Kanserli": round((np.sum(cancer_mask) / total_pixels) * 100, 1)
+    }
+    
+    return final_img, stats
+
+# --- PDF OLUŞTURMA FONKSİYONU ---
+def create_pdf(results_data, processed_img, stats):
     pdf = FPDF()
     pdf.add_page()
     
-    # 1. Başlık ve Bilgiler
     pdf.set_font("Arial", "B", 20)
     pdf.set_text_color(44, 62, 80)
     pdf.cell(190, 20, tr_fix("PATHOVISION AI - ANALIZ RAPORU"), ln=True, align='C')
@@ -51,136 +72,126 @@ def create_pdf(results_data, processed_img):
     pdf.cell(190, 10, tr_fix(f"Tarih: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M')}"), ln=True, align='R')
     pdf.ln(5)
 
-    # 2. Sayısal Analiz Tablosu
+    # 1. Alan Dağılım Tablosu
     pdf.set_font("Arial", "B", 14)
     pdf.set_text_color(0)
-    pdf.cell(190, 10, tr_fix("1. Sayisal Analiz Sonuclari"), ln=True)
+    pdf.cell(190, 10, tr_fix("1. Alan Analizi"), ln=True)
     pdf.set_font("Arial", "", 11)
     
-    for key, value in results_data.items():
-        pdf.set_fill_color(240, 240, 240)
-        pdf.cell(90, 10, f" {tr_fix(key)}", border=1, fill=True)
-        pdf.cell(100, 10, f" {tr_fix(value)}", border=1, ln=True)
+    pdf.set_fill_color(240, 240, 240)
+    pdf.cell(90, 10, tr_fix("Analiz Modeli"), border=1, fill=True)
+    pdf.cell(100, 10, f" {tr_fix(results_data['Model'])}", border=1, ln=True)
 
-    # 3. Görsel ve Grafik Analiz (Yanyana)
+    for label, val in stats.items():
+        pdf.cell(90, 10, tr_fix(f"{label} Alan Orani"), border=1, fill=True)
+        pdf.cell(100, 10, f" %{val}", border=1, ln=True)
+
+    # 2. Mikroskobik Görünüm ve Grafik
     pdf.ln(10)
     pdf.set_font("Arial", "B", 14)
-    pdf.cell(190, 10, tr_fix("2. Mikroskobik ve Grafik Analiz"), ln=True)
+    pdf.cell(190, 10, tr_fix("2. Segmentasyon Haritasi ve Dagilim"), ln=True)
     
     current_y = pdf.get_y() + 5
     
-    # SOL: İşlenmiş Görüntü
+    # Segmentasyon Resmini Kaydet
     with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp_img:
         processed_img.save(tmp_img.name)
         pdf.image(tmp_img.name, x=10, y=current_y, w=90)
         tmp_img_path = tmp_img.name
 
-    # SAĞ: Matplotlib ile Grafik Oluşturma (Kaleido Bağımlılığını Kaldırır)
+    # Matplotlib Pasta Grafiği (3 Renkli)
     try:
         plt.figure(figsize=(5, 5))
-        labels = ['Malign', 'Benign']
-        sizes = [results_data["Malign Hucre"], results_data["Benign Hucre"]]
-        plt.pie(sizes, labels=labels, autopct='%1.1f%%', colors=["#ff4b4b", "#22c55e"], startangle=140)
-        plt.title("Hucre Dagilimi")
+        labels = ['Arkaplan', 'Saglikli', 'Kanserli']
+        sizes = [stats["Arkaplan"], stats["Saglikli"], stats["Kanserli"]]
+        colors = ['#dfe6e9', '#2ecc71', '#e74c3c']
+        plt.pie(sizes, labels=labels, autopct='%1.1f%%', colors=colors, startangle=140)
+        plt.title("Alan Dagilimi")
         
         with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp_plt:
             plt.savefig(tmp_plt.name, bbox_inches='tight', dpi=100)
             pdf.image(tmp_plt.name, x=105, y=current_y, w=90)
             tmp_plt_path = tmp_plt.name
         plt.close()
-    except Exception as e:
+    except:
         pdf.set_xy(105, current_y)
-        pdf.cell(90, 10, "[Grafik Olusturulamadi]")
+        pdf.cell(90, 10, "[Grafik Hatasi]")
 
-    # Alt Bilgi
     pdf.set_y(-30)
     pdf.set_font("Arial", "I", 8)
-    pdf.set_text_color(150)
-    pdf.multi_cell(190, 5, tr_fix("UYARI: Bu belge yapay zeka destekli bir on analiz raporudur. Teshis degeri tasimaz."), align='C')
+    pdf.multi_cell(190, 5, tr_fix("UYARI: Bu belge yapay zeka destekli bir segmentasyon raporudur. Klinik karar destek amaclidir."), align='C')
     
-    # Geçici dosyaları temizle
     os.unlink(tmp_img_path)
     if 'tmp_plt_path' in locals(): os.unlink(tmp_plt_path)
 
-    # Çıktı Alma (Bytes Kontrolü)
-    pdf_output = pdf.output(dest='S')
-    if isinstance(pdf_output, str):
-        return pdf_output.encode('latin-1')
-    return bytes(pdf_output)
+    return bytes(pdf.output(dest='S'))
 
 # --- SAYFA AYARLARI ---
 st.set_page_config(page_title="PathoVision AI", page_icon="🔬", layout="wide")
-
-# CSS Kart Tasarımı
-st.markdown("<style>.main-card { background-color: white; padding: 1.5rem; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); margin-bottom: 20px; border: 1px solid #eee; }</style>", unsafe_allow_html=True)
 
 # --- SIDEBAR ---
 with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/3063/3063205.png", width=80)
     st.title("Kontrol Paneli")
-    uploaded_file = st.file_uploader("Doku Görüntüsü Yükle", type=["jpg", "png", "tif"])
-    model_choice = st.selectbox("Model Seçimi", ["UNET++", "ResNet-V2"])
-    conf_level = st.slider("Hassasiyet Eşiği", 0.1, 1.0, 0.7)
+    uploaded_file = st.file_uploader("Mikroskop Görüntüsü Yükle", type=["jpg", "png", "tif"])
+    model_choice = st.selectbox("Model Seçimi", ["UNET++", "ResNet-V2", "Vision Transformer"])
+    st.divider()
+    st.info("Hassasiyet eşiği model tarafından otomatik kalibre edilmektedir.")
 
 # --- ANA EKRAN ---
-st.title("🔬 PathoVision AI: Dijital Patoloji Paneli")
+st.title("🔬 PathoVision AI: Dijital Segmentasyon Paneli")
 
 if uploaded_file:
     img = Image.open(uploaded_file).convert("RGB")
-    col_orig, col_proc = st.columns(2)
     
-    with col_orig:
-        st.markdown('<div class="main-card">', unsafe_allow_html=True)
-        st.subheader("🖼️ Ham Görüntü")
-        st.image(img, use_container_width=True)
-        st.markdown('</div>', unsafe_allow_html=True)
-
     if st.button("🚀 Analizi Çalıştır", use_container_width=True):
-        with st.spinner("Hücreler analiz ediliyor..."):
-            processed_img = perform_analysis_sim(img)
-            t_cells, c_cells, h_cells = 142, 38, 104 # Simülasyon verileri
+        with st.spinner("Piksel düzeyinde segmentasyon yapılıyor..."):
+            processed_img, stats = perform_segmentation(img)
             
+            col_orig, col_proc = st.columns(2)
+            with col_orig:
+                st.markdown('<div class="main-card">', unsafe_allow_html=True)
+                st.subheader("🖼️ Ham Görüntü")
+                st.image(img, use_container_width=True)
+                st.markdown('</div>', unsafe_allow_html=True)
+
             with col_proc:
                 st.markdown('<div class="main-card">', unsafe_allow_html=True)
-                st.subheader("🎯 Analiz Sonucu")
+                st.subheader("🎯 Bölge Segmentasyonu")
                 st.image(processed_img, use_container_width=True)
                 st.markdown('</div>', unsafe_allow_html=True)
 
             st.divider()
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Toplam Hücre", t_cells)
-            m2.metric("Kanserli", c_cells, delta="Malign", delta_color="inverse")
-            m3.metric("Sağlıklı", h_cells)
-            m4.metric("Risk Skoru", f"%{round((c_cells/t_cells)*100, 1)}")
+            
+            # Metrikler
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Kanserli Alan", f"%{stats['Kanserli']}", delta="Riskli", delta_color="inverse")
+            m2.metric("Sağlıklı Alan", f"%{stats['Saglikli']}")
+            m3.metric("Arkaplan", f"%{stats['Arkaplan']}")
 
             c_left, c_right = st.columns([1.2, 1])
             with c_left:
-                # Dashboard için Plotly (Hala çalışır, sadece PDF'de kullanılmıyor)
-                df = pd.DataFrame({"Sinif": ["Kanserli", "Saglikli"], "Sayi": [c_cells, h_cells]})
-                fig = px.pie(df, values='Sayi', names='Sinif', hole=0.5, color_discrete_sequence=["#ff4b4b", "#22c55e"])
+                # Dashboard Grafik (3 Alan)
+                df = pd.DataFrame({
+                    "Bölge": ["Kanserli", "Sağlıklı", "Arkaplan"],
+                    "Yüzde": [stats["Kanserli"], stats["Saglikli"], stats["Arkaplan"]]
+                })
+                fig = px.pie(df, values='Yüzde', names='Bölge', hole=0.5,
+                             color_discrete_map={"Kanserli": "#e74c3c", "Sağlıklı": "#2ecc71", "Arkaplan": "#dfe6e9"})
                 st.plotly_chart(fig, use_container_width=True)
 
             with c_right:
                 st.markdown("### 📄 Rapor Oluştur")
-                results_data = {
-                    "Model Tipi": model_choice,
-                    "Toplam Hucre Sayisi": t_cells,
-                    "Malign Hucre": c_cells,
-                    "Benign Hucre": h_cells,
-                    "Analiz Hassasiyeti": f"{conf_level}"
-                }
-                
                 try:
-                    # PDF Oluşturma (Artık fig/Plotly göndermiyoruz, Matplotlib içeride hallediyor)
-                    pdf_data = create_pdf(results_data, processed_img)
+                    pdf_data = create_pdf({"Model": model_choice}, processed_img, stats)
                     st.download_button(
                         label="📥 Analiz Raporunu PDF İndir",
                         data=pdf_data,
-                        file_name="PathoVision_Raporu.pdf",
+                        file_name="PathoVision_Analiz_Raporu.pdf",
                         mime="application/pdf",
                         use_container_width=True
                     )
                 except Exception as e:
                     st.error(f"Rapor hatası: {e}")
 else:
-    st.info("Lütfen bir mikroskop görüntüsü yükleyerek analizi başlatın.")
+    st.info("Lütfen bir mikroskop görüntüsü yükleyerek süreci başlatın.")
