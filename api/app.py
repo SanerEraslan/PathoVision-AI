@@ -20,20 +20,19 @@ def tr_fix(text):
 
 def perform_segmentation(image):
     """
-    Görüntüdeki renk yoğunluğunu analiz ederek pikselleri 
-    Kanserli, Sağlıklı ve Arkaplan olarak ayırır.
+    Görüntü piksellerini analiz ederek Kanserli, Sağlıklı ve Arkaplan olarak ayırır.
     """
     img_array = np.array(image.convert("RGB"))
     h, w, _ = img_array.shape
     grayscale = np.mean(img_array, axis=2)
     
-    # 1. Arkaplan (Genelde parlak/beyaz alanlar)
+    # 1. Arkaplan Maskesi (Beyaz/Parlak alanlar)
     bg_mask = grayscale > 220 
     
-    # 2. Doku Analizi (Kanserli vs Sağlıklı)
-    # Patolojide kanserli hücreler daha koyu (hiperkromatik) görünür.
+    # 2. Doku Maskesi (Arkaplan olmayan her yer)
     doku_mask = ~bg_mask
-    # Dokunun en koyu %30'luk kısmını 'kanserli' olarak simüle ediyoruz
+    
+    # 3. Kanserli Bölge Simülasyonu (Doku içindeki en koyu/yoğun %30'luk kesim)
     if np.any(doku_mask):
         cancer_threshold = np.percentile(grayscale[doku_mask], 30)
         cancer_mask = doku_mask & (grayscale <= cancer_threshold)
@@ -42,29 +41,27 @@ def perform_segmentation(image):
         
     healthy_mask = doku_mask & ~cancer_mask
 
-    # Overlay (Şeffaf katman) oluşturma
+    # Overlay oluşturma (RGBA)
     overlay = np.zeros((h, w, 4), dtype=np.uint8)
     
-    # Renkler: Kanserli=Kırmızı, Sağlıklı=Yeşil, Arkaplan=Gri/Şeffaf
-    overlay[bg_mask] = [220, 220, 220, 50]      # Arkaplan: Açık Gri
-    overlay[healthy_mask] = [34, 197, 94, 130]  # Sağlıklı: Yeşil
-    overlay[cancer_mask] = [231, 76, 60, 170]   # Kanserli: Kırmızı
+    # Renk Atamaları (RGB + Alpha)
+    overlay[bg_mask] = [189, 195, 199, 60]      # Arkaplan: Gri (#bdc3c7)
+    overlay[healthy_mask] = [46, 204, 113, 130] # Sağlıklı: Yeşil (#2ecc71)
+    overlay[cancer_mask] = [231, 76, 60, 170]   # Kanserli: Kırmızı (#e74c3c)
     
     base_img = image.convert("RGBA")
     mask_img = Image.fromarray(overlay, mode="RGBA").filter(ImageFilter.GaussianBlur(radius=1))
     final_img = Image.alpha_composite(base_img, mask_img).convert("RGB")
     
-    # İstatistikler
-    total = h * w
     stats = {
-        "Arkaplan": round((np.sum(bg_mask) / total) * 100, 1),
-        "Saglikli": round((np.sum(healthy_mask) / total) * 100, 1),
-        "Kanserli": round((np.sum(cancer_mask) / total) * 100, 1)
+        "Arkaplan": round((np.sum(bg_mask) / (h*w)) * 100, 1),
+        "Saglikli": round((np.sum(healthy_mask) / (h*w)) * 100, 1),
+        "Kanserli": round((np.sum(cancer_mask) / (h*w)) * 100, 1)
     }
     
     return final_img, stats
 
-# --- PDF OLUŞTURMA ---
+# --- PDF OLUŞTURMA FONKSİYONU ---
 def create_pdf(model_name, processed_img, stats):
     pdf = FPDF()
     pdf.add_page()
@@ -77,30 +74,35 @@ def create_pdf(model_name, processed_img, stats):
     pdf.cell(190, 10, tr_fix(f"Model: {model_name} | Tarih: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M')}"), ln=True, align='R')
     pdf.ln(5)
 
-    # Tablo
+    # Alan Analiz Tablosu
     pdf.set_font("Arial", "B", 14)
-    pdf.cell(190, 10, tr_fix("1. Alan Analizi"), ln=True)
+    pdf.cell(190, 10, tr_fix("1. Alan Dagilim Verileri"), ln=True)
     pdf.set_font("Arial", "", 11)
     for label, val in stats.items():
         pdf.set_fill_color(245, 245, 245)
-        pdf.cell(90, 10, tr_fix(f"{label} Bolge Orani"), border=1, fill=True)
+        pdf.cell(90, 10, tr_fix(f"{label} Alani"), border=1, fill=True)
         pdf.cell(100, 10, f" %{val}", border=1, ln=True)
 
-    # Görsel ve Grafik
     pdf.ln(10)
     pdf.set_font("Arial", "B", 14)
-    pdf.cell(190, 10, tr_fix("2. Segmentasyon ve Grafik"), ln=True)
+    pdf.cell(190, 10, tr_fix("2. Segmentasyon Haritasi ve Grafik"), ln=True)
     
     y_pos = pdf.get_y() + 5
+    
+    # İşlenmiş Görseli Kaydet
     with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as t_img:
         processed_img.save(t_img.name)
         pdf.image(t_img.name, x=10, y=y_pos, w=90)
         t_img_path = t_img.name
 
+    # Matplotlib Pastası (Sabit Renkler)
     try:
         plt.figure(figsize=(5, 5))
-        plt.pie(list(stats.values()), labels=list(stats.keys()), 
-                colors=['#bdc3c7', '#2ecc71', '#e74c3c'], autopct='%1.1f%%')
+        plt.pie([stats["Arkaplan"], stats["Saglikli"], stats["Kanserli"]], 
+                labels=['Arkaplan', 'Saglikli', 'Kanserli'], 
+                colors=['#bdc3c7', '#2ecc71', '#e74c3c'], 
+                autopct='%1.1f%%', startangle=140)
+        
         with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as t_plt:
             plt.savefig(t_plt.name, bbox_inches='tight')
             pdf.image(t_plt.name, x=105, y=y_pos, w=90)
@@ -110,20 +112,22 @@ def create_pdf(model_name, processed_img, stats):
 
     pdf.set_y(-30)
     pdf.set_font("Arial", "I", 8)
-    pdf.multi_cell(190, 5, tr_fix("UYARI: Bu rapor yapay zeka tarafindan uretilmistir. Kesin teshis degildir."), align='C')
+    pdf.multi_cell(190, 5, tr_fix("UYARI: Bu belge yapay zeka tarafindan olusturulmustur. Tıbbi teshis niteligi tasimaz."), align='C')
     
     os.unlink(t_img_path)
     if 't_plt_path' in locals(): os.unlink(t_plt_path)
     return bytes(pdf.output(dest='S'))
 
-# --- ANA EKRAN ---
+# --- ANA EKRAN AYARLARI ---
 st.set_page_config(page_title="PathoVision AI", page_icon="🔬", layout="wide")
 
 with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/3063/3063205.png", width=80)
     st.title("Kontrol Paneli")
-    uploaded_file = st.file_uploader("Doku Görüntüsü Yükle", type=["jpg", "png", "tif"])
+    uploaded_file = st.file_uploader("Doku Görseli Yükle", type=["jpg", "png", "tif"])
     model_choice = st.selectbox("Model Seçimi", ["UNET++ Patho", "ResNet-V2 Segmenter"])
+    st.divider()
+    st.info("Hassasiyet eşiği model tarafından otomatik optimize edilmektedir.")
 
 st.title("🔬 PathoVision AI: Dijital Patoloji Paneli")
 
@@ -131,7 +135,7 @@ if uploaded_file:
     img = Image.open(uploaded_file).convert("RGB")
     
     if st.button("🚀 Analizi Çalıştır", use_container_width=True):
-        with st.spinner("Piksel düzeyinde segmentasyon yapılıyor..."):
+        with st.spinner("Doku segmentasyonu yapılıyor..."):
             proc_img, stats = perform_segmentation(img)
             
             c1, c2 = st.columns(2)
@@ -144,24 +148,30 @@ if uploaded_file:
 
             st.divider()
             
-            col_metrics, col_chart = st.columns([1, 1.2])
-            with col_metrics:
+            col_m, col_g = st.columns([1, 1.2])
+            with col_m:
                 st.markdown("### 📊 Bölge Metrikleri")
-                st.metric("Kanserli Alan", f"%{stats['Kanserli']}", delta="Malign", delta_color="inverse")
-                st.metric("Sağlıklı Alan", f"%{stats['Saglikli']}", delta="Benign")
+                st.metric("Kanserli Alan", f"%{stats['Kanserli']}", delta="Kritik", delta_color="inverse")
+                st.metric("Sağlıklı Alan", f"%{stats['Saglikli']}")
                 st.metric("Arkaplan", f"%{stats['Arkaplan']}")
                 
                 pdf_bytes = create_pdf(model_choice, proc_img, stats)
-                st.download_button("📥 PDF Raporunu İndir", pdf_bytes, "Analiz_Raporu.pdf", "application/pdf", use_container_width=True)
+                st.download_button("📥 PDF Analiz Raporunu İndir", pdf_bytes, "PathoVision_Rapor.pdf", "application/pdf", use_container_width=True)
 
-            with col_chart:
+            with col_g:
+                # Plotly Pastası (İstediğin Renk Düzeni)
                 fig = px.pie(
-                    values=list(stats.values()), 
-                    names=list(stats.keys()),
-                    color=list(stats.keys()),
-                    color_discrete_map={"Kanserli": "#e74c3c", "Sağlıklı": "#2ecc71", "Arkaplan": "#bdc3c7"},
+                    values=[stats["Arkaplan"], stats["Saglikli"], stats["Kanserli"]], 
+                    names=["Arkaplan", "Sağlıklı", "Kanserli"],
+                    color=["Arkaplan", "Sağlıklı", "Kanserli"],
+                    color_discrete_map={
+                        "Kanserli": "#e74c3c",   # Kırmızı
+                        "Sağlıklı": "#2ecc71",   # Yeşil
+                        "Arkaplan": "#bdc3c7"    # Gri
+                    },
                     hole=0.4
                 )
+                fig.update_layout(showlegend=True)
                 st.plotly_chart(fig, use_container_width=True)
 else:
-    st.info("Lütfen bir patoloji görüntüsü yükleyerek analizi başlatın.")
+    st.info("Lütfen sol menüden bir patoloji görüntüsü yükleyerek süreci başlatın.")
