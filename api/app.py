@@ -2,13 +2,13 @@ import streamlit as st
 import io
 import pandas as pd
 import plotly.express as px
-from PIL import Image, ImageOps
+from PIL import Image, ImageOps, ImageDraw
 from fpdf import FPDF
 import tempfile
 import os
 
-# --- PDF OLUŞTURMA FONKSİYONU (Görsel ve Grafik Destekli) ---
-def create_pdf(results_data, model_type, original_img, chart_fig):
+# --- PDF OLUŞTURMA FONKSİYONU ---
+def create_pdf(results_data, model_type, processed_img, chart_fig):
     pdf = FPDF()
     pdf.add_page()
     
@@ -42,126 +42,95 @@ def create_pdf(results_data, model_type, original_img, chart_fig):
     
     current_y = pdf.get_y() + 5
     
-    # Görseli geçici dosyaya kaydet ve PDF'e ekle
+    # Analiz edilmiş görseli PDF'e ekle
     with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp_img:
-        original_img.save(tmp_img.name)
+        processed_img.save(tmp_img.name)
         pdf.image(tmp_img.name, x=10, y=current_y, w=90)
     
-    # Grafiği (Plotly) Byte olarak al ve PDF'e ekle
-    # NOT: kaleido yüklü olmalıdır. Hata devam ederse 'pip install kaleido==0.2.1.post1' kullanın.
+    # Grafiği PDF'e ekle
     try:
         img_bytes = chart_fig.to_image(format="png", engine="kaleido")
         with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp_chart:
             tmp_chart.write(img_bytes)
             tmp_chart.flush()
             pdf.image(tmp_chart.name, x=105, y=current_y, w=90)
-    except Exception as e:
+    except:
         pdf.set_xy(105, current_y)
-        pdf.set_font("Arial", "I", 8)
-        pdf.cell(90, 10, "[Grafik yuklenemedi]", border=0)
+        pdf.cell(90, 10, "[Grafik Hatasi]", border=0)
 
-    pdf.ln(75) # Görseller için dinamik boşluk
-    
-    # Yasal Uyarı Paneli
     pdf.set_y(-40)
     pdf.set_font("Arial", "I", 8)
     pdf.set_text_color(150)
-    pdf.multi_cell(190, 5, "UYARI: Bu belge yapay zeka tarafindan desteklenmis bir on analiz raporudur. Teshis degeri tasimaz. Lutfen uzman bir patolog tarafindan onaylanmis resmi raporu bekleyiniz.", align='C')
+    pdf.multi_cell(190, 5, "UYARI: Bu rapor yapay zeka yardimiyla hazirlanmistir. Kesin teshis icin doktor onayi sarttir.", align='C')
     
-    # Bellek üzerinden PDF döndür
-    return pdf.output(dest='S').encode('latin-1')
+    # HATA DÜZELTME: bytearray/bytes kontrolü
+    output = pdf.output(dest='S')
+    if isinstance(output, str):
+        return output.encode('latin-1')
+    return output
+
+# --- ANALİZ SİMÜLASYONU (Kırmızı ve Yeşil İşaretleme) ---
+def perform_analysis_sim(image):
+    # Orijinal resmi taban olarak al
+    base = image.convert("RGBA")
+    overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    
+    w, h = base.size
+    # Kanserli hücre simülasyonu (Kırmızı)
+    for _ in range(12):
+        x, y = w * 0.4, h * 0.3
+        draw.ellipse([x-30, y-30, x+30, y+30], fill=(255, 0, 0, 80), outline=(255, 0, 0, 200))
+        
+    # Sağlıklı hücre simülasyonu (Yeşil)
+    for _ in range(20):
+        x, y = w * 0.6, h * 0.7
+        draw.ellipse([x-25, y-25, x+25, y+25], fill=(0, 255, 0, 80), outline=(0, 255, 0, 200))
+        
+    return Image.alpha_composite(base, overlay).convert("RGB")
 
 # --- SAYFA AYARLARI ---
 st.set_page_config(page_title="PathoVision AI", page_icon="🔬", layout="wide")
 
-st.markdown("""
-    <style>
-    .stApp { background-color: #f8f9fa; }
-    .main-card { 
-        background-color: white; 
-        padding: 1.5rem; 
-        border-radius: 12px; 
-        box-shadow: 0 4px 12px rgba(0,0,0,0.08);
-        margin-bottom: 20px;
-    }
-    </style>
-""", unsafe_allow_html=True)
-
-# --- SIDEBAR ---
-with st.sidebar:
-    st.image("https://cdn-icons-png.flaticon.com/512/3063/3063205.png", width=80)
-    st.title("Ayarlar")
-    uploaded_file = st.file_uploader("Doku Görüntüsü Yükle", type=["jpg", "png", "tif"])
-    model_choice = st.selectbox("Model Seçimi", ["UNET++", "ResNet-V2"])
-    conf_level = st.slider("Hassasiyet Eşiği", 0.1, 1.0, 0.7)
-
 # --- ANA EKRAN ---
-st.title("🔬 PathoVision AI: Dijital Patoloji Paneli")
+st.title("🔬 PathoVision AI: Hücre Analiz Paneli")
 
-if uploaded_file:
+if uploaded_file := st.sidebar.file_uploader("Doku Görüntüsü", type=["jpg", "png"]):
     img = Image.open(uploaded_file).convert("RGB")
     
-    col_orig, col_proc = st.columns(2)
-    
-    with col_orig:
-        st.markdown('<div class="main-card">', unsafe_allow_html=True)
-        st.subheader("🖼️ Ham Görüntü")
-        st.image(img, use_container_width=True)
-        st.markdown('</div>', unsafe_allow_html=True)
-
-    if st.button("🚀 Analizi Çalıştır", use_container_width=True):
-        with st.spinner("Hücreler sınıflandırılıyor..."):
-            # MODEL ÇIKTISI (Simülasyon)
-            import time; time.sleep(1.2)
-            processed_img = ImageOps.colorize(ImageOps.grayscale(img), black="black", white="#ff4b4b")
+    if st.button("🚀 Analizi Başlat", use_container_width=True):
+        processed_img = perform_analysis_sim(img)
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.image(img, caption="Ham Görüntü", use_container_width=True)
+        with col2:
+            st.image(processed_img, caption="İşaretlenmiş Görüntü (Kırmızı: Malign, Yeşil: Benign)", use_container_width=True)
             
-            t_cells, c_cells, h_cells = 142, 38, 104
+        # Sonuçlar
+        t_cells, c_cells, h_cells = 150, 45, 105
+        
+        st.divider()
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Toplam Hücre", t_cells)
+        m2.metric("Kanserli", c_cells, delta="Malign", delta_color="inverse")
+        m3.metric("Sağlıklı", h_cells)
+        
+        # Grafik
+        df = pd.DataFrame({"Sınıf": ["Kanserli", "Sağlıklı"], "Sayı": [c_cells, h_cells]})
+        fig = px.pie(df, values='Sayı', names='Sınıf', hole=0.5, color_discrete_sequence=["#ef4444", "#22c55e"])
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # PDF Raporu
+        try:
+            results_data = {"Toplam Hücre": t_cells, "Kanserli": c_cells, "Sağlıklı": h_cells}
+            pdf_bytes = create_pdf(results_data, "UNET++", processed_img, fig)
             
-            with col_proc:
-                st.markdown('<div class="main-card">', unsafe_allow_html=True)
-                st.subheader("🎯 Tespit Edilen Alanlar")
-                st.image(processed_img, use_container_width=True)
-                st.markdown('</div>', unsafe_allow_html=True)
-
-            # Metrik Paneli
-            st.divider()
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Toplam Hücre", t_cells)
-            m2.metric("Kanserli", c_cells, delta="Malign", delta_color="inverse")
-            m3.metric("Sağlıklı", h_cells)
-            m4.metric("Risk Skoru", f"%{round((c_cells/t_cells)*100, 1)}")
-
-            # Grafik ve Raporlama
-            c_left, c_right = st.columns([1.2, 1])
-            
-            with c_left:
-                df = pd.DataFrame({"Sınıf": ["Kanserli", "Sağlıklı"], "Sayı": [c_cells, h_cells]})
-                fig = px.pie(df, values='Sayı', names='Sınıf', hole=0.5,
-                             color_discrete_sequence=["#ff4b4b", "#22c55e"])
-                fig.update_layout(title="Hücre Dağılım Analizi")
-                st.plotly_chart(fig, use_container_width=True)
-
-            with c_right:
-                st.markdown("### 📄 Rapor Oluştur")
-                results_pdf = {
-                    "Model": model_choice,
-                    "Toplam Hucre": t_cells,
-                    "Malign Hucre": c_cells,
-                    "Benign Hucre": h_cells,
-                    "Hassasiyet": f"{conf_level}"
-                }
-                
-                # PDF Oluşturma (Hata Kontrollü)
-                try:
-                    pdf_output = create_pdf(results_pdf, model_choice, img, fig)
-                    st.download_button(
-                        label="📥 Analiz Raporunu PDF İndir",
-                        data=pdf_output,
-                        file_name="PathoVision_Rapor.pdf",
-                        mime="application/pdf",
-                        use_container_width=True
-                    )
-                except Exception as e:
-                    st.error(f"PDF oluşturulurken bir hata oluştu: {e}")
-else:
-    st.info("Analize başlamak için lütfen sol menüden bir mikroskop görüntüsü yükleyin.")
+            st.download_button(
+                label="📥 Analiz Raporunu İndir",
+                data=pdf_bytes,
+                file_name="PathoVision_Analiz.pdf",
+                mime="application/pdf"
+            )
+        except Exception as e:
+            st.error(f"Rapor oluşturma hatası: {e}")
