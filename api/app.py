@@ -72,20 +72,23 @@ def create_pdf(results_data, model_type, processed_img, chart_fig):
     
     current_y = pdf.get_y() + 5
     
+    # Analiz edilmiş görseli ekle
     with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp_img:
         processed_img.save(tmp_img.name)
         pdf.image(tmp_img.name, x=10, y=current_y, w=90)
     
+    # --- GRAFİK ENTEGRASYONU (KALEIDO DÜZELTMELİ) ---
     try:
-        img_bytes = chart_fig.to_image(format="png", engine="kaleido")
+        # engine="kaleido" zorunludur. Hata verirse pip install kaleido==0.2.1.post1
+        img_bytes = chart_fig.to_image(format="png", engine="kaleido", width=800, height=600, scale=2)
         with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp_chart:
             tmp_chart.write(img_bytes)
             tmp_chart.flush()
             pdf.image(tmp_chart.name, x=105, y=current_y, w=90)
-    except:
+    except Exception as e:
         pdf.set_xy(105, current_y)
         pdf.set_font("Arial", "I", 8)
-        pdf.cell(90, 10, "[Grafik yuklenemedi]", border=0)
+        pdf.cell(90, 10, tr_fix(f"[Grafik Hatasi: {str(e)[:20]}]"), border=0)
 
     pdf.set_y(-40)
     pdf.set_font("Arial", "I", 8)
@@ -93,16 +96,15 @@ def create_pdf(results_data, model_type, processed_img, chart_fig):
     warning_text = "UYARI: Bu belge yapay zeka destekli bir on analiz raporudur. Teshis degeri tasimaz."
     pdf.multi_cell(190, 5, tr_fix(warning_text), align='C')
     
-    # --- KRİTİK DÜZELTME: BYTEARRAY HATASI İÇİN ---
+    # --- ÇIKTI TİPİ KONTROLÜ ---
     pdf_output = pdf.output(dest='S')
     if isinstance(pdf_output, str):
         return pdf_output.encode('latin-1')
-    return bytes(pdf_output) # bytearray gelirse saf bytes'a çevirir
+    return bytes(pdf_output) 
 
 # --- SAYFA AYARLARI ---
 st.set_page_config(page_title="PathoVision AI", page_icon="🔬", layout="wide")
 
-# CSS Kart Tasarımı
 st.markdown("""
     <style>
     .main-card { background-color: white; padding: 1.5rem; border-radius: 12px; 
@@ -153,6 +155,7 @@ if uploaded_file:
             with c_left:
                 df = pd.DataFrame({"Sinif": ["Kanserli", "Saglikli"], "Sayi": [c_cells, h_cells]})
                 fig = px.pie(df, values='Sayi', names='Sinif', hole=0.5, color_discrete_sequence=["#ff4b4b", "#22c55e"])
+                fig.update_layout(title_text="Hücre Dağılım Analizi", title_x=0.5)
                 st.plotly_chart(fig, use_container_width=True)
 
             with c_right:
@@ -175,6 +178,6 @@ if uploaded_file:
                         use_container_width=True
                     )
                 except Exception as e:
-                    st.error(f"Rapor hatası: {e}")
+                    st.error(f"Rapor oluşturulurken hata oluştu: {e}")
 else:
     st.info("Lütfen bir mikroskop görüntüsü yükleyerek analizi başlatın.")
