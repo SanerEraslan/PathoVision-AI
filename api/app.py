@@ -20,16 +20,16 @@ def load_patho_model(model_choice):
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
-    # Seçilen modele göre mimariyi oluştur
+    # Seçilen eski isimlere göre doğru mimariyi ve dosyayı eşleştir
     if "UNET++" in model_choice:
         model = smp.UnetPlusPlus(encoder_name="resnet34", encoder_weights=None, in_channels=3, classes=1)
         filename = "UNetPlusPlus_best.pth"
     else:
+        # ResNet-V2 Segmenter ismini standart UNet modeline yönlendiriyoruz
         model = smp.Unet(encoder_name="resnet34", encoder_weights=None, in_channels=3, classes=1)
         filename = "UNet_best.pth"
         
     try:
-        # Modeli Hugging Face Hub'dan indir
         checkpoint_path = hf_hub_download(repo_id=REPO_ID, filename=filename)
         model.load_state_dict(torch.load(checkpoint_path, map_location=device))
         model.to(device).eval()
@@ -42,12 +42,12 @@ def load_patho_model(model_choice):
 def perform_real_segmentation(image, model, device):
     orig_w, orig_h = image.size
     
-    # 1. Ön İşleme (Modelin beklediği 256x256 boyutu)
+    # 1. Ön İşleme
     input_img = image.resize((256, 256))
     img_array = np.array(input_img).astype(np.float32) / 255.0
     img_tensor = torch.from_numpy(img_array).permute(2, 0, 1).unsqueeze(0).to(device)
     
-    # 2. Tahmin (Inference)
+    # 2. Tahmin
     with torch.no_grad():
         output = model(img_tensor)
         mask = torch.sigmoid(output).squeeze().cpu().numpy()
@@ -57,8 +57,8 @@ def perform_real_segmentation(image, model, device):
     mask_final = np.array(mask_resized) / 255.0
     
     # 4. İstatistik ve Arkaplan Ayırımı
-    # Arkaplan için parlaklık eşiği (Geleneksel yöntemle birleştirildi)
-    grayscale = np.mean(np.array(image), axis=2)
+    img_array_full = np.array(image.convert("RGB"))
+    grayscale = np.mean(img_array_full, axis=2)
     bg_mask = grayscale > 220
     
     # Kanserli maske (AI'dan gelen ve arkaplan olmayan alan)
@@ -73,13 +73,13 @@ def perform_real_segmentation(image, model, device):
         "Kanserli": round((np.sum(cancer_mask) / total) * 100, 1)
     }
 
-    # 5. Görselleştirme (Overlay)
+    # 5. Görselleştirme (Overlay) - ESKİ RENK DÜZENİ
     img_rgba = image.convert("RGBA")
     overlay = np.zeros((orig_h, orig_w, 4), dtype=np.uint8)
     
-    overlay[bg_mask] = [189, 195, 199, 60]      # Gri
-    overlay[healthy_mask] = [46, 204, 113, 130] # Yeşil
-    overlay[cancer_mask] = [231, 76, 60, 170]   # Kırmızı
+    overlay[bg_mask] = [189, 195, 199, 60]      # Arkaplan: Gri (#bdc3c7)
+    overlay[healthy_mask] = [46, 204, 113, 130] # Sağlıklı: Yeşil (#2ecc71)
+    overlay[cancer_mask] = [231, 76, 60, 170]   # Kanserli: Kırmızı (#e74c3c)
     
     mask_layer = Image.fromarray(overlay, mode="RGBA").filter(ImageFilter.GaussianBlur(radius=1))
     final_img = Image.alpha_composite(img_rgba, mask_layer).convert("RGB")
@@ -94,9 +94,11 @@ def tr_fix(text):
         text = str(text).replace(tr, lat)
     return text
 
+# --- ESKİ PDF OLUŞTURMA FONKSİYONU ---
 def create_pdf(model_name, processed_img, stats):
     pdf = FPDF()
     pdf.add_page()
+    
     pdf.set_font("Arial", "B", 20)
     pdf.set_text_color(44, 62, 80)
     pdf.cell(190, 20, tr_fix("PATHOVISION AI - ANALIZ RAPORU"), ln=True, align='C')
@@ -105,6 +107,7 @@ def create_pdf(model_name, processed_img, stats):
     pdf.cell(190, 10, tr_fix(f"Model: {model_name} | Tarih: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M')}"), ln=True, align='R')
     pdf.ln(5)
 
+    # Alan Analiz Tablosu (Orijinal Düzen)
     pdf.set_font("Arial", "B", 14)
     pdf.cell(190, 10, tr_fix("1. Alan Dagilim Verileri"), ln=True)
     pdf.set_font("Arial", "", 11)
@@ -115,18 +118,37 @@ def create_pdf(model_name, processed_img, stats):
 
     pdf.ln(10)
     pdf.set_font("Arial", "B", 14)
-    pdf.cell(190, 10, tr_fix("2. Segmentasyon Sonucu"), ln=True)
+    pdf.cell(190, 10, tr_fix("2. Segmentasyon Haritasi ve Grafik"), ln=True)
     
+    y_pos = pdf.get_y() + 5
+    
+    # İşlenmiş Görseli Kaydet
     with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as t_img:
         processed_img.save(t_img.name)
-        pdf.image(t_img.name, x=10, y=pdf.get_y() + 5, w=170)
+        pdf.image(t_img.name, x=10, y=y_pos, w=90)
         t_img_path = t_img.name
+
+    # Matplotlib Pastası
+    try:
+        plt.figure(figsize=(5, 5))
+        plt.pie([stats["Arkaplan"], stats["Saglikli"], stats["Kanserli"]], 
+                labels=['Arkaplan', 'Saglikli', 'Kanserli'], 
+                colors=['#bdc3c7', '#2ecc71', '#e74c3c'], 
+                autopct='%1.1f%%', startangle=140)
+        
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as t_plt:
+            plt.savefig(t_plt.name, bbox_inches='tight')
+            pdf.image(t_plt.name, x=105, y=y_pos, w=90)
+            t_plt_path = t_plt.name
+        plt.close()
+    except: pass
 
     pdf.set_y(-30)
     pdf.set_font("Arial", "I", 8)
     pdf.multi_cell(190, 5, tr_fix("UYARI: Bu belge yapay zeka tarafindan olusturulmustur. Tibbi teshis niteligi tasimaz."), align='C')
     
     os.unlink(t_img_path)
+    if 't_plt_path' in locals(): os.unlink(t_plt_path)
     return bytes(pdf.output(dest='S'))
 
 # --- ANA EKRAN AYARLARI ---
@@ -136,10 +158,9 @@ with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/3063/3063205.png", width=80)
     st.title("Kontrol Paneli")
     uploaded_file = st.file_uploader("Doku Görseli Yükle", type=["jpg", "png", "tif"])
-    # MODEL İSİMLERİ GÜNCELLENDİ
-    model_choice = st.selectbox("Model Seçimi", ["UNET++ (Nested)", "UNET (Standard)"])
+    # ESKİ MODEL İSİMLERİ GERİ GELDİ
+    model_choice = st.selectbox("Model Seçimi", ["UNET++ Patho", "ResNet-V2 Segmenter"])
     
-    # Modeli otomatik yükle
     active_model, device = load_patho_model(model_choice)
     st.divider()
     st.info(f"Aktif Cihaz: {device.upper()}")
@@ -149,9 +170,9 @@ st.title("🔬 PathoVision AI: Dijital Patoloji Paneli")
 if uploaded_file:
     img = Image.open(uploaded_file).convert("RGB")
     
-    if st.button("🚀 AI Analizini Başlat", use_container_width=True):
+    if st.button("🚀 Analizi Çalıştır", use_container_width=True):
         if active_model is not None:
-            with st.spinner("Yapay zeka dokuyu hücre seviyesinde analiz ediyor..."):
+            with st.spinner("AI Modeli analiz yapıyor..."):
                 proc_img, stats = perform_real_segmentation(img, active_model, device)
                 
                 c1, c2 = st.columns(2)
@@ -159,7 +180,7 @@ if uploaded_file:
                     st.subheader("🖼️ Ham Görüntü")
                     st.image(img, use_container_width=True)
                 with c2:
-                    st.subheader("🎯 AI Segmentasyon Haritası")
+                    st.subheader("🎯 Segmentasyon Haritası")
                     st.image(proc_img, use_container_width=True)
 
                 st.divider()
@@ -185,6 +206,6 @@ if uploaded_file:
                     fig.update_layout(showlegend=True)
                     st.plotly_chart(fig, use_container_width=True)
         else:
-            st.error("Model yüklenemedi. Lütfen internet bağlantınızı veya Hugging Face repo ayarlarınızı kontrol edin.")
+            st.error("Model yüklenemedi.")
 else:
     st.info("Lütfen sol menüden bir patoloji görüntüsü yükleyerek süreci başlatın.")
