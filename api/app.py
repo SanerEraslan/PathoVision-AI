@@ -175,5 +175,3 @@ if uploaded_file:
                 st.plotly_chart(fig, use_container_width=True)
 else:
     st.info("Lütfen sol menüden bir patoloji görüntüsü yükleyerek süreci başlatın.")
-
-güncellemeleri entegre et ve tüm kodu eksiksiz ver unutma sadece modellerin adını yeni model adıyla değiştirmelisin
