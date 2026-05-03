@@ -2,6 +2,7 @@
 torch
 torchvision
 segmentation-models-pytorch
+huggingface_hub
 
 # --- Görüntü İşleme ---
 numpy
@@ -15,9 +16,6 @@ streamlit
 pandas
 plotly
 
-# --- Güvenlik & Araçlar ---
+# --- Raporlama & Araçlar ---
 python-dotenv
-
 fpdf2
-plotly
-pandas
