@@ -15,26 +15,81 @@ from huggingface_hub import hf_hub_download
 # --- MODEL YÜKLEME VE ÖNBELLEKLEME ---
 @st.cache_resource
 def load_patho_model(model_choice):
-    # Hugging Face Bilgilerin
+    # Kendi Hugging Face Bilgilerin
     REPO_ID = "SanerEraslan/PathoVision-Models" 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
-    # Model seçimine göre dosya adı ve mimari belirleme
+    # HATA ÇÖZÜMÜ: classes=3 olarak ayarlandı (Model ağırlıklarınız 3 sınıf içeriyor)
     if "UNET++" in model_choice:
-        model = smp.UnetPlusPlus(encoder_name="resnet34", encoder_weights=None, in_channels=3, classes=1)
+        model = smp.UnetPlusPlus(encoder_name="resnet34", encoder_weights=None, in_channels=3, classes=3)
         filename = "evrensel_kanser_modeli_pro.pth"
     else:
-        model = smp.Unet(encoder_name="resnet34", encoder_weights=None, in_channels=3, classes=1)
+        model = smp.Unet(encoder_name="resnet34", encoder_weights=None, in_channels=3, classes=3)
         filename = "evrensel_kanser_modeli.pth"
         
     try:
         checkpoint_path = hf_hub_download(repo_id=REPO_ID, filename=filename)
+        # map_location cihaz uyumsuzluklarını önler
         model.load_state_dict(torch.load(checkpoint_path, map_location=device))
         model.to(device).eval()
         return model, device
     except Exception as e:
-        st.error(f"Model yüklenirken hata oluştu: {e}")
+        st.error(f"Model yüklenirken hata: {e}")
         return None, device
+
+# --- GERÇEK ANALİZ (INFERENCE) FONKSİYONU ---
+def perform_real_segmentation(image, model, device):
+    orig_w, orig_h = image.size
+    
+    # 1. Ön İşleme
+    input_img = image.resize((256, 256))
+    img_array = np.array(input_img).astype(np.float32) / 255.0
+    img_tensor = torch.from_numpy(img_array).permute(2, 0, 1).unsqueeze(0).to(device)
+    
+    # 2. Tahmin (Multi-class Inference)
+    with torch.no_grad():
+        output = model(img_tensor)
+        # Softmax ile olasılıkları 3 kanala dağıtıyoruz
+        probs = torch.softmax(output, dim=1).squeeze().cpu().numpy()
+    
+    # 3. Kanalları Ayırma ve Boyutlandırma
+    # probs[0] = Arkaplan, probs[1] = Sağlıklı, probs[2] = Kanserli
+    def resize_mask(mask_array):
+        return np.array(Image.fromarray((mask_array * 255).astype(np.uint8)).resize((orig_w, orig_h))) / 255.0
+
+    bg_ai = resize_mask(probs[0])
+    healthy_ai = resize_mask(probs[1])
+    cancer_ai = resize_mask(probs[2])
+
+    # 4. Final Karar (En yüksek olasılığa sahip sınıfı seçme)
+    # AI bazen boş alanları da doku sanabilir, parlaklık eşiğiyle destekliyoruz
+    grayscale = np.mean(np.array(image), axis=2)
+    hard_bg_mask = grayscale > 235 # Çok parlak alanlar kesin arkaplandır
+    
+    final_cancer = (cancer_ai > healthy_ai) & (cancer_ai > bg_ai) & (~hard_bg_mask)
+    final_healthy = (healthy_ai >= cancer_ai) & (healthy_ai > bg_ai) & (~hard_bg_mask)
+    final_bg = ~(final_cancer | final_healthy)
+
+    # 5. İstatistikler
+    total = orig_w * orig_h
+    stats = {
+        "Arkaplan": round((np.sum(final_bg) / total) * 100, 1),
+        "Saglikli": round((np.sum(final_healthy) / total) * 100, 1),
+        "Kanserli": round((np.sum(final_cancer) / total) * 100, 1)
+    }
+
+    # 6. Görselleştirme (Overlay)
+    img_rgba = image.convert("RGBA")
+    overlay = np.zeros((orig_h, orig_w, 4), dtype=np.uint8)
+    
+    overlay[final_bg] = [189, 195, 199, 60]      # Gri
+    overlay[final_healthy] = [46, 204, 113, 130] # Yeşil
+    overlay[final_cancer] = [231, 76, 60, 170]   # Kırmızı
+    
+    mask_layer = Image.fromarray(overlay, mode="RGBA").filter(ImageFilter.GaussianBlur(radius=1))
+    final_img = Image.alpha_composite(img_rgba, mask_layer).convert("RGB")
+    
+    return final_img, stats
 
 # --- YARDIMCI FONKSİYONLAR ---
 def tr_fix(text):
@@ -44,50 +99,6 @@ def tr_fix(text):
         text = str(text).replace(tr, lat)
     return text
 
-def perform_real_segmentation(image, model, device):
-    """Görüntüyü AI modelinden geçirir ve istatistikleri hesaplar."""
-    orig_w, orig_h = image.size
-    
-    # 1. AI Çıkarımı (Inference) için Ön İşleme
-    input_img = image.resize((256, 256))
-    img_array = np.array(input_img).astype(np.float32) / 255.0
-    img_tensor = torch.from_numpy(img_array).permute(2, 0, 1).unsqueeze(0).to(device)
-    
-    with torch.no_grad():
-        output = model(img_tensor)
-        mask = torch.sigmoid(output).squeeze().cpu().numpy()
-    
-    # 2. Maskeyi Orijinal Boyuta Döndür
-    mask_resized = Image.fromarray((mask * 255).astype(np.uint8)).resize((orig_w, orig_h))
-    mask_final = np.array(mask_resized) / 255.0
-    
-    # 3. Arkaplan ve Doku Ayrımı
-    grayscale = np.mean(np.array(image), axis=2)
-    bg_mask = grayscale > 220 
-    
-    # Kanserli maske: AI'nın 0.5 üstü dediği VE arkaplan olmayan yerler
-    cancer_mask = (mask_final > 0.5) & (~bg_mask)
-    healthy_mask = (~cancer_mask) & (~bg_mask)
-
-    # 4. Görselleştirme (Overlay)
-    overlay = np.zeros((orig_h, orig_w, 4), dtype=np.uint8)
-    overlay[bg_mask] = [189, 195, 199, 60]      # Gri
-    overlay[healthy_mask] = [46, 204, 113, 130] # Yeşil
-    overlay[cancer_mask] = [231, 76, 60, 170]   # Kırmızı
-    
-    base_img = image.convert("RGBA")
-    mask_img = Image.fromarray(overlay, mode="RGBA").filter(ImageFilter.GaussianBlur(radius=1))
-    final_img = Image.alpha_composite(base_img, mask_img).convert("RGB")
-    
-    total_pixels = orig_w * orig_h
-    stats = {
-        "Arkaplan": round((np.sum(bg_mask) / total_pixels) * 100, 1),
-        "Saglikli": round((np.sum(healthy_mask) / total_pixels) * 100, 1),
-        "Kanserli": round((np.sum(cancer_mask) / total_pixels) * 100, 1)
-    }
-    return final_img, stats
-
-# --- PDF OLUŞTURMA ---
 def create_pdf(model_name, processed_img, stats):
     pdf = FPDF()
     pdf.add_page()
@@ -138,7 +149,7 @@ def create_pdf(model_name, processed_img, stats):
     if 't_plt_path' in locals(): os.unlink(t_plt_path)
     return bytes(pdf.output(dest='S'))
 
-# --- ANA EKRAN ---
+# --- ANA EKRAN AYARLARI ---
 st.set_page_config(page_title="PathoVision AI", page_icon="🔬", layout="wide")
 
 with st.sidebar:
@@ -153,41 +164,44 @@ with st.sidebar:
 
 st.title("🔬 PathoVision AI: Dijital Patoloji Paneli")
 
-if uploaded_file and active_model:
+if uploaded_file:
     img = Image.open(uploaded_file).convert("RGB")
     
     if st.button("🚀 Analizi Çalıştır", use_container_width=True):
-        with st.spinner("AI Modelleri dokuyu analiz ediyor..."):
-            proc_img, stats = perform_real_segmentation(img, active_model, device)
-            
-            c1, c2 = st.columns(2)
-            with c1:
-                st.subheader("🖼️ Ham Görüntü")
-                st.image(img, use_container_width=True)
-            with c2:
-                st.subheader("🎯 Segmentasyon Haritası")
-                st.image(proc_img, use_container_width=True)
-
-            st.divider()
-            
-            col_m, col_g = st.columns([1, 1.2])
-            with col_m:
-                st.markdown("### 📊 Bölge Metrikleri")
-                st.metric("Kanserli Alan", f"%{stats['Kanserli']}", delta="Kritik", delta_color="inverse")
-                st.metric("Sağlıklı Alan", f"%{stats['Saglikli']}")
-                st.metric("Arkaplan", f"%{stats['Arkaplan']}")
+        if active_model is not None:
+            with st.spinner("AI dokuyu analiz ediyor..."):
+                proc_img, stats = perform_real_segmentation(img, active_model, device)
                 
-                pdf_bytes = create_pdf(model_choice, proc_img, stats)
-                st.download_button("📥 PDF Analiz Raporunu İndir", pdf_bytes, "PathoVision_Rapor.pdf", "application/pdf", use_container_width=True)
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.subheader("🖼️ Ham Görüntü")
+                    st.image(img, use_container_width=True)
+                with c2:
+                    st.subheader("🎯 Segmentasyon Haritası")
+                    st.image(proc_img, use_container_width=True)
 
-            with col_g:
-                fig = px.pie(
-                    values=[stats["Arkaplan"], stats["Saglikli"], stats["Kanserli"]], 
-                    names=["Arkaplan", "Sağlıklı", "Kanserli"],
-                    color=["Arkaplan", "Sağlıklı", "Kanserli"],
-                    color_discrete_map={"Kanserli": "#e74c3c", "Sağlıklı": "#2ecc71", "Arkaplan": "#bdc3c7"},
-                    hole=0.4
-                )
-                st.plotly_chart(fig, use_container_width=True)
+                st.divider()
+                
+                col_m, col_g = st.columns([1, 1.2])
+                with col_m:
+                    st.markdown("### 📊 Bölge Metrikleri")
+                    st.metric("Kanserli Alan", f"%{stats['Kanserli']}", delta="Kritik", delta_color="inverse")
+                    st.metric("Sağlıklı Alan", f"%{stats['Saglikli']}")
+                    st.metric("Arkaplan", f"%{stats['Arkaplan']}")
+                    
+                    pdf_bytes = create_pdf(model_choice, proc_img, stats)
+                    st.download_button("📥 PDF Analiz Raporunu İndir", pdf_bytes, "PathoVision_Rapor.pdf", "application/pdf", use_container_width=True)
+
+                with col_g:
+                    fig = px.pie(
+                        values=[stats["Arkaplan"], stats["Saglikli"], stats["Kanserli"]], 
+                        names=["Arkaplan", "Sağlıklı", "Kanserli"],
+                        color=["Arkaplan", "Sağlıklı", "Kanserli"],
+                        color_discrete_map={"Kanserli": "#e74c3c", "Sağlıklı": "#2ecc71", "Arkaplan": "#bdc3c7"},
+                        hole=0.4
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.error("Model yüklenemedi, lütfen tekrar deneyin.")
 else:
-    st.info("Lütfen sol menüden bir patoloji görüntüsü yükleyin ve modelin hazır olmasını bekleyin.")
+    st.info("Lütfen sol menüden bir patoloji görüntüsü yükleyerek süreci başlatın.")
