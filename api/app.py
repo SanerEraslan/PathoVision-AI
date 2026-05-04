@@ -19,13 +19,13 @@ def load_patho_model(model_choice):
     REPO_ID = "SanerEraslan/PathoVision-Models" 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
-    # HATA ÇÖZÜMÜ: classes=3 olarak ayarlandı (Model ağırlıklarınız 3 sınıf içeriyor)
+    # GÜNCEL MODEL İSİMLERİ VE 3 SINIF YAPISI
     if "UNET++" in model_choice:
         model = smp.UnetPlusPlus(encoder_name="resnet34", encoder_weights=None, in_channels=3, classes=3)
-        filename = "evrensel_kanser_modeli_pro.pth"
+        filename = "UNetPlusPlus_best.pth"
     else:
         model = smp.Unet(encoder_name="resnet34", encoder_weights=None, in_channels=3, classes=3)
-        filename = "evrensel_kanser_modeli.pth"
+        filename = "UNet_best.pth"
         
     try:
         checkpoint_path = hf_hub_download(repo_id=REPO_ID, filename=filename)
@@ -34,14 +34,14 @@ def load_patho_model(model_choice):
         model.to(device).eval()
         return model, device
     except Exception as e:
-        st.error(f"Model yüklenirken hata: {e}")
+        st.error(f"Model yüklenirken hata oluştu ({filename}): {e}")
         return None, device
 
 # --- GERÇEK ANALİZ (INFERENCE) FONKSİYONU ---
 def perform_real_segmentation(image, model, device):
     orig_w, orig_h = image.size
     
-    # 1. Ön İşleme
+    # 1. Ön İşleme (Modeller genelde 256x256 eğitilir)
     input_img = image.resize((256, 256))
     img_array = np.array(input_img).astype(np.float32) / 255.0
     img_tensor = torch.from_numpy(img_array).permute(2, 0, 1).unsqueeze(0).to(device)
@@ -49,22 +49,22 @@ def perform_real_segmentation(image, model, device):
     # 2. Tahmin (Multi-class Inference)
     with torch.no_grad():
         output = model(img_tensor)
-        # Softmax ile olasılıkları 3 kanala dağıtıyoruz
+        # Sınıf bazlı olasılıklar (0: Background, 1: Cancer, 2: Healthy)
         probs = torch.softmax(output, dim=1).squeeze().cpu().numpy()
     
     # 3. Kanalları Ayırma ve Boyutlandırma
-    # probs[0] = Arkaplan, probs[1] = Sağlıklı, probs[2] = Kanserli
     def resize_mask(mask_array):
-        return np.array(Image.fromarray((mask_array * 255).astype(np.uint8)).resize((orig_w, orig_h))) / 255.0
+        # Maskeyi orijinal görüntü boyutuna geri getir
+        return np.array(Image.fromarray((mask_array * 255).astype(np.uint8)).resize((orig_w, orig_h), Image.BILINEAR)) / 255.0
 
     bg_ai = resize_mask(probs[0])
-    healthy_ai = resize_mask(probs[1])
-    cancer_ai = resize_mask(probs[2])
+    cancer_ai = resize_mask(probs[1])
+    healthy_ai = resize_mask(probs[2])
 
-    # 4. Final Karar (En yüksek olasılığa sahip sınıfı seçme)
-    # AI bazen boş alanları da doku sanabilir, parlaklık eşiğiyle destekliyoruz
+    # 4. Final Karar (Argmax mantığı: en yüksek olasılık kazansın)
+    # Görüntüdeki aşırı parlak (boş) alanları manuel temizle
     grayscale = np.mean(np.array(image), axis=2)
-    hard_bg_mask = grayscale > 235 # Çok parlak alanlar kesin arkaplandır
+    hard_bg_mask = grayscale > 235 
     
     final_cancer = (cancer_ai > healthy_ai) & (cancer_ai > bg_ai) & (~hard_bg_mask)
     final_healthy = (healthy_ai >= cancer_ai) & (healthy_ai > bg_ai) & (~hard_bg_mask)
@@ -82,11 +82,12 @@ def perform_real_segmentation(image, model, device):
     img_rgba = image.convert("RGBA")
     overlay = np.zeros((orig_h, orig_w, 4), dtype=np.uint8)
     
+    # Renk atamaları (Saydamlık değerleri sondaki 4. kanaldır)
     overlay[final_bg] = [189, 195, 199, 60]      # Gri
     overlay[final_healthy] = [46, 204, 113, 130] # Yeşil
     overlay[final_cancer] = [231, 76, 60, 170]   # Kırmızı
     
-    mask_layer = Image.fromarray(overlay, mode="RGBA").filter(ImageFilter.GaussianBlur(radius=1))
+    mask_layer = Image.fromarray(overlay, mode="RGBA").filter(ImageFilter.GaussianBlur(radius=0.5))
     final_img = Image.alpha_composite(img_rgba, mask_layer).convert("RGB")
     
     return final_img, stats
@@ -156,11 +157,12 @@ with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/3063/3063205.png", width=80)
     st.title("Kontrol Paneli")
     uploaded_file = st.file_uploader("Doku Görseli Yükle", type=["jpg", "png", "tif"])
-    model_choice = st.selectbox("Model Seçimi", ["UNET++ Patho", "UNET Patho"])
+    model_choice = st.selectbox("Model Seçimi", ["UNET++ Patho (Pro)", "UNET Patho (Fast)"])
     
+    # Modeli Sidebar'da Yükle
     active_model, device = load_patho_model(model_choice)
     st.divider()
-    st.info(f"Aktif Cihaz: {device.upper()}")
+    st.info(f"Cihaz: {device.upper()}")
 
 st.title("🔬 PathoVision AI: Dijital Patoloji Paneli")
 
@@ -185,7 +187,10 @@ if uploaded_file:
                 col_m, col_g = st.columns([1, 1.2])
                 with col_m:
                     st.markdown("### 📊 Bölge Metrikleri")
-                    st.metric("Kanserli Alan", f"%{stats['Kanserli']}", delta="Kritik", delta_color="inverse")
+                    # Risk durumuna göre metrik gösterimi
+                    st.metric("Kanserli Alan", f"%{stats['Kanserli']}", 
+                              delta="Kritik" if stats['Kanserli'] > 1.0 else "Normal", 
+                              delta_color="inverse" if stats['Kanserli'] > 1.0 else "normal")
                     st.metric("Sağlıklı Alan", f"%{stats['Saglikli']}")
                     st.metric("Arkaplan", f"%{stats['Arkaplan']}")
                     
@@ -202,6 +207,6 @@ if uploaded_file:
                     )
                     st.plotly_chart(fig, use_container_width=True)
         else:
-            st.error("Model yüklenemedi, lütfen tekrar deneyin.")
+            st.error("Model yüklenemedi. Lütfen Hugging Face bağlantısını ve dosya isimlerini kontrol edin.")
 else:
     st.info("Lütfen sol menüden bir patoloji görüntüsü yükleyerek süreci başlatın.")
