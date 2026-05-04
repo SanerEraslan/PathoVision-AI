@@ -5,8 +5,8 @@ import numpy as np
 import io
 import base64
 import os
+from huggingface_hub import hf_hub_download
 
-# --- KÜTÜPHANE KONTROLLERİ ---
 try:
     import cv2
     CV2_AVAILABLE = True
@@ -19,118 +19,104 @@ try:
 except ImportError:
     SMP_AVAILABLE = False
 
-# AYARLAR
 IMG_SIZE = (256, 256)
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 class ModelInference:
     def __init__(self):
         self.device = DEVICE
-        # Dinamik yol tespiti
-        self.current_dir = os.path.dirname(os.path.abspath(__file__))
-        
-        # Modellerin bulunduğu klasör (api/models)
-        self.models_dir = os.path.join(self.current_dir, "models")
-
-        # GÜNCEL MODEL İSİMLERİ
-        self.path_fast = os.path.join(self.models_dir, "UNet_best.pth")
-        self.path_pro = os.path.join(self.models_dir, "UNetPlusPlus_best.pth")
-
+        self.repo_id = "SanerEraslan/PathoVision-Models" # Kendi Repo ID'n
         self.models = {}
+        
+        # Hugging Face üzerindeki dosya isimlerin
+        self.model_files = {
+            "unet": "UNet_best.pth",
+            "unetplus": "UNetPlusPlus_best.pth"
+        }
 
         if SMP_AVAILABLE:
-            # 3 Sınıf (Background, Cancer, Healthy) desteğiyle yükleme
-            self._load_model("unet", self.path_fast)
-            self._load_model("unetplus", self.path_pro)
+            self._load_all_models()
 
-    def _load_model(self, key, path):
-        if os.path.exists(path):
+    def _load_all_models(self):
+        for key, filename in self.model_files.items():
             try:
-                # Modeller classes=3 (Multi-class) olarak yapılandırıldı
+                # Modeli Hugging Face'ten indir
+                checkpoint_path = hf_hub_download(repo_id=self.repo_id, filename=filename)
+                
+                # Model mimarisini oluştur (classes=1 hatayı çözen kısımdır)
                 if key == "unet":
-                    model = smp.Unet(encoder_name="resnet34", encoder_weights=None, in_channels=3, classes=3)
+                    model = smp.Unet(encoder_name="resnet34", encoder_weights=None, in_channels=3, classes=1)
                 else:
-                    model = smp.UnetPlusPlus(encoder_name="resnet34", encoder_weights=None, in_channels=3, classes=3)
+                    model = smp.UnetPlusPlus(encoder_name="resnet34", encoder_weights=None, in_channels=3, classes=1)
                 
                 # Ağırlıkları yükle
-                model.load_state_dict(torch.load(path, map_location=self.device))
+                model.load_state_dict(torch.load(checkpoint_path, map_location=self.device))
                 model.eval()
                 self.models[key] = model.to(self.device)
-                print(f"✅ Yüklendi: {key} ({os.path.basename(path)})")
+                print(f"✅ HF üzerinden yüklendi: {filename}")
             except Exception as e:
-                print(f"❌ {key} yüklenemedi: {e}")
-        else:
-            print(f"⚠️ Dosya bulunamadı: {path}")
-
-    def visualize_prediction(self, original_image, pred_mask):
-        if not CV2_AVAILABLE: return original_image
-        
-        img_np = np.array(original_image.convert("RGB"))
-        overlay = img_np.copy()
-        
-        # pred_mask değerlerine göre renklendirme (0: BG, 1: Cancer, 2: Healthy)
-        # Sınıf indeksleriniz farklıysa buradaki 1 ve 2'nin yerini değiştirebilirsiniz
-        overlay[pred_mask == 1] = [231, 76, 60]  # Kanser: Kırmızı
-        overlay[pred_mask == 2] = [46, 204, 113] # Sağlıklı: Yeşil
-        
-        # Orijinal görüntü ile maskeyi birleştir
-        img_final = cv2.addWeighted(overlay, 0.4, img_np, 0.6, 0)
-        return Image.fromarray(img_final)
+                print(f"❌ {filename} yüklenemedi: {e}")
 
     def predict(self, image_bytes, model_type="unet"):
-        # Seçilen modele göre anahtarı belirle
-        key = "unetplus" if model_type in ["unetplusplus", "unetplus"] else "unet"
-        
+        key = "unetplus" if "plus" in model_type.lower() else "unet"
         if key not in self.models:
-            if self.models:
-                key = list(self.models.keys())[0]
-            else:
-                return self._return_error_result(f"Model dosyaları bulunamadı. Lütfen {self.models_dir} klasörünü kontrol edin.")
+            return {"diagnosis": {"title": "HATA", "message": "Model yüklenemedi.", "color": "#dc2626"}}
 
         try:
             image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
             orig_size = image.size
             
-            # Ön İşleme
             transform = transforms.Compose([
                 transforms.Resize(IMG_SIZE),
                 transforms.ToTensor(),
             ])
             input_tensor = transform(image).unsqueeze(0).to(self.device)
 
-            # AI Tahmini
             with torch.no_grad():
                 output = self.models[key](input_tensor)
-                # 3 kanallı çıktıdan en yüksek olasılıklı sınıfı seç (argmax)
-                pred_mask = torch.argmax(output, dim=1).squeeze().cpu().numpy()
+                # Binary model olduğu için Sigmoid kullanıyoruz
+                prob_mask = torch.sigmoid(output).squeeze().cpu().numpy()
 
-            # Maskeyi orijinal boyuta getir (Hızlı ve kesin olması için NEAREST kullanılır)
-            mask_resized = np.array(Image.fromarray(pred_mask.astype(np.uint8)).resize(orig_size, Image.NEAREST))
+            # Maskeyi orijinal boyuta getir
+            mask_resized = np.array(Image.fromarray((prob_mask * 255).astype(np.uint8)).resize(orig_size, Image.BILINEAR)) / 255.0
             
-            # İstatistiksel Hesaplamalar
-            total_pixels = mask_resized.size
-            cancer_pixels = np.sum(mask_resized == 1) # Sınıf 1 = Kanser varsayıldı
-            cancer_ratio = (cancer_pixels / (total_pixels + 1e-6)) * 100
+            # Arkaplan ayıklama (Beyaz alanlar)
+            grayscale = np.mean(np.array(image), axis=2)
+            is_bg = grayscale > 230
+            
+            # Kanserli alan hesabı (Eşik: 0.5)
+            is_cancer = (mask_resized > 0.5) & (~is_bg)
+            cancer_ratio = (np.sum(is_cancer) / (mask_resized.size + 1e-6)) * 100
 
             return {
-                "detected_cells": int(np.sum(mask_resized > 0) / 160), # Tahmini hücre yoğunluğu
                 "predicted_ratio": round(cancer_ratio, 2),
-                "visualization": self._image_to_base64(self.visualize_prediction(image, mask_resized)),
-                "diagnosis": self._calculate_risk_status(cancer_ratio)
+                "visualization": self._image_to_base64(self.visualize_prediction(image, is_cancer, is_bg)),
+                "diagnosis": self._calculate_risk_status(cancer_ratio),
+                "stats": {
+                    "Kanserli": round(cancer_ratio, 1),
+                    "Sağlıklı": round(100 - cancer_ratio - (np.sum(is_bg)/is_bg.size*100), 1),
+                    "Arkaplan": round(np.sum(is_bg)/is_bg.size*100, 1)
+                }
             }
         except Exception as e:
-            return self._return_error_result(f"Analiz sırasında hata: {str(e)}")
+            return {"diagnosis": {"title": "HATA", "message": str(e), "color": "#dc2626"}}
+
+    def visualize_prediction(self, original_image, cancer_mask, bg_mask):
+        img_np = np.array(original_image.convert("RGB"))
+        overlay = img_np.copy()
+        
+        # Renklendirme
+        overlay[cancer_mask] = [231, 76, 60] # Kanser: Kırmızı
+        overlay[bg_mask] = [189, 195, 199]   # Arkaplan: Gri
+        
+        if CV2_AVAILABLE:
+            img_final = cv2.addWeighted(overlay, 0.4, img_np, 0.6, 0)
+            return Image.fromarray(img_final)
+        return Image.fromarray(overlay)
 
     def _calculate_risk_status(self, ratio):
-        if ratio < 1.0: 
-            return {"title": "TEMİZ / DÜŞÜK RİSK", "color": "#10b981", "status": "normal"}
-        elif ratio < 5.0:
-            return {"title": "ORTA RİSK - TAKİP ÖNERİLİR", "color": "#f59e0b", "status": "warning"}
-        else:
-            return {"title": "YÜKSEK RİSK / ŞÜPHELİ", "color": "#dc2626", "status": "critical"}
-
-    def _return_error_result(self, msg):
-        return {"diagnosis": {"title": "HATA", "message": msg, "color": "#dc2626"}}
+        if ratio < 1.0: return {"title": "DÜŞÜK RİSK", "color": "#10b981"}
+        return {"title": "YÜKSEK RİSK", "color": "#dc2626"}
 
     def _image_to_base64(self, image):
         buf = io.BytesIO()
