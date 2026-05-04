@@ -252,7 +252,7 @@ with st.sidebar:
 
     uploaded_file = st.file_uploader("Doku Görseli Yükle", type=["jpg", "png", "tif"])
 
-    model_choice = st.selectbox("Model Seçimi", ["UNET++ Patho", "ResNet-V2 Segmenter"])
+    model_choice = st.selectbox("Model Seçimi", ["UNET++ Patho", "UNET Patho"])
 
     st.divider()
 
