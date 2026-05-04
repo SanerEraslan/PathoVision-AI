@@ -125,7 +125,7 @@ with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/3063/3063205.png", width=80)
     st.title("Kontrol Paneli")
     uploaded_file = st.file_uploader("Doku Görseli Yükle", type=["jpg", "png", "tif"])
-    model_choice = st.selectbox("Model Seçimi", ["UNET++ Patho", "ResNet-V2 Segmenter"])
+    model_choice = st.selectbox("Model Seçimi", ["UNET++ Patho", "UNET Patho"])
     st.divider()
     st.info("Hassasiyet eşiği model tarafından otomatik optimize edilmektedir.")
 
