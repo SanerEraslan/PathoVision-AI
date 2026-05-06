@@ -187,13 +187,20 @@ if uploaded_file:
                 | **%20 ve Üzeri** | <span style='color:#e74c3c'>● Kritik Seviye</span> |
                 
                 ---
-                **Bilgilendirme:** Bu cetvel, toplam doku alanı içerisindeki tümör yükünü temel alarak oluşturulmuştur.
                 """, unsafe_allow_html=True)
                 
-                if stats['Kanserli'] > 5.0:
-                    st.warning("Dikkat: Yüksek tümör yükü saptandı.")
+                # --- DİNAMİK DURUM YÖNETİMİ ---
+                cancer_val = stats['Kanserli']
+                if cancer_val <= 1.0:
+                    st.success(f"✅ Durum: Düşük Risk (%{cancer_val})")
+                elif 1.0 < cancer_val <= 5.0:
+                    st.warning(f"⚠️ Durum: Orta Risk (%{cancer_val})")
+                elif 5.0 < cancer_val <= 20.0:
+                    st.error(f"🚨 Durum: Yüksek Risk (%{cancer_val})")
                 else:
-                    st.success("Analiz tamamlandı.")
+                    st.error(f"☢️ Durum: KRİTİK SEVİYE (%{cancer_val})")
+                
+                st.info("**Bilgilendirme:** Bu cetvel, toplam doku alanı içerisindeki tümör yükünü temel alarak oluşturulmuştur.")
 
 else:
     st.info("Lütfen sol menüden bir patoloji görüntüsü yükleyerek süreci başlatın.")
